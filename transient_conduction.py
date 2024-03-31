@@ -91,16 +91,11 @@ def solve_euler(k, c_p, rho, q, T0, w, nx, times):
 
 
 def solve(k, c_p, rho, q, T0, w, nx, times):
-
     x = np.linspace(0, w, nx)
-
     ic = T0(x)
-    dx = x[1]-x[0]
-    #sol = odeint(rhs, y0=ic, t=times, args=(x, k, c_p, rho, q), hmax=dx)
-    
+    dx = x[1]-x[0]    
     sol = solve_ivp(rhs, t_span=(0, times[-1]), y0=ic, t_eval=times, args=(x, k, c_p, rho, q), method="BDF")
     sol=sol.y
-
     return sol, x
 
 
@@ -118,12 +113,11 @@ def get_A(x, T, fk, fc_p, frho):
     assert len(x) == len(T)
     n = len(x)
     Δx = x[1] - x[0]
-
     # Initialize system matrix
     A = np.zeros((n, n))
     # Left boundary condition
-    A[0, 0] = -1
-    A[0, 1] = 1
+    A[0, 0] = -1/Δx
+    A[0, 1] = 1/Δx
     # Right boundary condition
     A[-1, -1] = 1
     # Internal cells
@@ -131,7 +125,7 @@ def get_A(x, T, fk, fc_p, frho):
     c_p = fc_p(x, T)
     rho = frho(x)
     for i in range(1, n-1):
-        a = (k[i+1] - k[i-1])/(4*Δx*rho[i]*c_p[i])
+        a = (k[i+1] - k[i-1])/(4*Δx**2*rho[i]*c_p[i])
         b = k[i] / (Δx**2*rho[i]*c_p[i])
         A[i, i-1] = -a+b
         A[i, i]   = -2*b
@@ -174,13 +168,10 @@ def k_cladding(T) :
 
 if __name__ == "__main__":
 
-    x = np.linspace(0, 1, 101)
-
-    ic = lambda x: 1 if x < 0.5 else 0.0
+    nx = 77
 
     def ic(x):
-        y = x**0
-        y[x>0.5] = 0.0
+        y = x**0; y[x>0.5] = 0.0
         return y
 
     k = lambda x, T: 1.0*x**0  
@@ -188,26 +179,27 @@ if __name__ == "__main__":
     rho = lambda x: 1*x**0
     q = lambda x, t: 1*x**0
 
+    def q(x, t):
+        v = x**0 
+        if t > 5:
+            v[x<.5] = 0
+        return v
+
     times = np.linspace(0, 50, 11)
 
-    A = get_A(x, ic(x), k, c_p, rho)
-    qq = get_source(ic(x), 1, x, k, c_p, rho, q)
-
+    xx = np.linspace(0, 1, nx)
+    A = get_A(xx, ic(xx), k, c_p, rho)
+    qq = get_source(ic(xx), 8, xx, k, c_p, rho, q)
     T_ss = np.linalg.solve(-A, qq)
-    plt.plot(x, T_ss, 'r--x')
-    #plt.spy(A)
-    #sol = odeint(rhs, y0=ic(x), t=times, args=(x, k, c_p, rho, q))
+    plt.plot(xx, T_ss, 'g--x', label="steady")
 
-    sol = solve_ivp(rhs, t_span=(0, times[-1]), y0=ic(x), t_eval=times, args=(x, k, c_p, rho, q), method="BDF")
-    sol=sol.y
+    sol, x = solve(k, c_p, rho, q, ic, 1.0, 101, times)
 
-    sol, _ = solve(k, c_p, rho, q, ic, 1.0, 101, times)
+    for i in range(len(times)):
+        plt.plot(x, sol[:, i], color=plt.cm.copper((i/len(times)))); 
+    plt.xlabel("x"); plt.ylabel("T(x)");
 
-    solE, _ = solve_euler(k, c_p, rho, q, ic, 1.0, 101, times)
-
-    plt.plot(x, sol, 'g')
-
-    plt.plot(x, solE, 'b--')
+    plt.legend()
     plt.show()
 
 
