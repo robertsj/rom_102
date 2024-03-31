@@ -1,52 +1,149 @@
 """
 Transient condunction in plate fuel elements.
+
+Provides tools for solving
+
+  rho*c_p*T_t = (d/dx)*[k(x,T)*dT/dx] + q'''
+
+s.t.
+
+  T'(0, t) = 0 and   T(w, t) = 0 .
+
+where w is the wall width.    
+
+Uses finite-difference method:
+
+  T_t = (1/[rho*c_p]) * [(ΔkΔT + kΔ^2 T) + q''')
+
+where Δ and Δ^2 indicate first and second central differences, i.e.,
+
+  Δy[i]   = (y[i+1]-y[i-1])/(2Δ)
+  Δ^2y[i] = (y[i+1]-2*y[i]+y[i-1])/(2Δ^2)
+
+Solution uses odeint in time.
+
+The user provides:
+
+  - function k(x, T)   # array x, array T  len(x) == len(T)
+  - function c_p(x, T) # array x, array T  len(x) == len(T)
+  - function rho(x)    # array x
+  - function q(x, t)   # array x, float t
+  - function T0(x)     # array x, (initial condition)
+  - float w 
+  - float t_final
+  - int n_x (or d_x)
+  - int n_t (or d_t)
+  - float d_x (adjusts down in size to produce integer n_x)
+  - float d_t (adjusts down in size to produce integer n_t)
+  - array t (times when solution is wanted)
+
+Uses backward Euler with fixed step sizes in x and t.
+
+
 """
 
 import numpy as np 
+from scipy.integrate import odeint, solve_ivp
+import matplotlib.pyplot as plt
 
-def A(x, fk, fc_p, frho, T):
+def rhs(t, T, x, k, c_p, rho, q):
+    """ A@T + q'''/(rho*c_p)
+    """
+    A = get_A(x, T, k, c_p, rho)
+
+    qq = q(x, t)
+    qq[-1] = 0.0 # does not get added to bc
+    qq[0] = 0.0
+    return A@T + qq/(rho(x)*c_p(x, T)) 
+
+def get_source(T, t, x, k, c_p, rho, q):
+    qq = q(x, t)
+    qq[-1] = 0.0 # does not get added to bc
+    qq[0] = 0.0 
+    return qq 
+
+def solve_euler(k, c_p, rho, q, T0, w, nx, times):
+    x = np.linspace(0, w, nx)
+    ic = T0(x)
+
+    A = get_A(x, x**0, k, c_p, rho)
+
+    qq = q(x, 1)
+    qq[-1] = 0.0 # does not get added to bc
+    qq[0] = 0.0
+
+    # dydt = A*y + qq
+    #  y1-y0 = dt*A*y1 + dt*qq
+    #  (I-dt*A)*y1 = y0 + dt*qq
+    I = np.eye(len(x))
+
+    dt = 0.5
+    nt = 101
+    sol = np.zeros((len(x), nt))
+    sol[:, 0] = ic 
+
+    for i in range(1, 101):
+        y0 = sol[:, i-1]
+        y1 = np.linalg.solve((I-dt*A), y0+dt*qq)
+        sol[:, i] = y1 
+    return sol, x
+
+
+
+def solve(k, c_p, rho, q, T0, w, nx, times):
+
+    x = np.linspace(0, w, nx)
+
+    ic = T0(x)
+    dx = x[1]-x[0]
+    #sol = odeint(rhs, y0=ic, t=times, args=(x, k, c_p, rho, q), hmax=dx)
+    
+    sol = solve_ivp(rhs, t_span=(0, times[-1]), y0=ic, t_eval=times, args=(x, k, c_p, rho, q), method="BDF")
+    sol=sol.y
+
+    return sol, x
+
+
+def get_A(x, T, fk, fc_p, frho):
     """Generate conduction problem system matrix given constants and temperature.
 
     Args:
+        T (_type_): _description_
         fk (_type_): function k(x, )
         fc_p (_type_): _description_
         frho (_type_): _description_
         T (_type_): _description_
     """
-
+ 
     assert len(x) == len(T)
     n = len(x)
-
     Δx = x[1] - x[0]
-
-    # Generate discrete values of constants
-    k = fk(x, T)
-    c_p = fc_p(x, T)
-    rho = frho(x)
 
     # Initialize system matrix
     A = np.zeros((n, n))
-
     # Left boundary condition
     A[0, 0] = -1
     A[0, 1] = 1
-
     # Right boundary condition
     A[-1, -1] = 1
-
-    a = (k[i+1] - k[i-1])/(4*Δx*rho[i]*c_p[i])
-    b = k[i] / (Δx**2*rho[i]*c_p[i])
-
+    # Internal cells
+    k = fk(x, T)
+    c_p = fc_p(x, T)
+    rho = frho(x)
     for i in range(1, n-1):
+        a = (k[i+1] - k[i-1])/(4*Δx*rho[i]*c_p[i])
+        b = k[i] / (Δx**2*rho[i]*c_p[i])
         A[i, i-1] = -a+b
         A[i, i]   = -2*b
-        A[i, i+1] = a 
-
+        A[i, i+1] = a+b
     return A 
 
-def k_system(x, T):
+ 
+def get_pod_basis(snapshots, rank):
 
+    U, S, V = np.linalg.svd(snapshots)
 
+    return U[:, 0:rank], S[:, 0:rank]
 
 def k_fuel(T_K, B=0.0) : 
     """ Calculate fuel conductivity (W/m-K) for temperature T_K (K)
@@ -74,8 +171,43 @@ def k_cladding(T) :
     """
     return 7.511 + 2.088e-2*T - 1.45e-5*T**2 + 7.668e-9*T**3
 
-def k(x, T):
 
-    k
+if __name__ == "__main__":
+
+    x = np.linspace(0, 1, 101)
+
+    ic = lambda x: 1 if x < 0.5 else 0.0
+
+    def ic(x):
+        y = x**0
+        y[x>0.5] = 0.0
+        return y
+
+    k = lambda x, T: 1.0*x**0  
+    c_p = lambda x, T: 1*x**0
+    rho = lambda x: 1*x**0
+    q = lambda x, t: 1*x**0
+
+    times = np.linspace(0, 50, 11)
+
+    A = get_A(x, ic(x), k, c_p, rho)
+    qq = get_source(ic(x), 1, x, k, c_p, rho, q)
+
+    T_ss = np.linalg.solve(-A, qq)
+    plt.plot(x, T_ss, 'r--x')
+    #plt.spy(A)
+    #sol = odeint(rhs, y0=ic(x), t=times, args=(x, k, c_p, rho, q))
+
+    sol = solve_ivp(rhs, t_span=(0, times[-1]), y0=ic(x), t_eval=times, args=(x, k, c_p, rho, q), method="BDF")
+    sol=sol.y
+
+    sol, _ = solve(k, c_p, rho, q, ic, 1.0, 101, times)
+
+    solE, _ = solve_euler(k, c_p, rho, q, ic, 1.0, 101, times)
+
+    plt.plot(x, sol, 'g')
+
+    plt.plot(x, solE, 'b--')
+    plt.show()
 
 
