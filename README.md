@@ -1,9 +1,9 @@
 # Reduced-Order Model Mini-Series: ROM 102
 
-Jeremy Roberts
-Associate Professor
-Alan Levin Department of Mechanical and Nuclear Engineering
-Kansas State University
+ - Jeremy Roberts
+ - Associate Professor
+ - Alan Levin Department of Mechanical and Nuclear Engineering
+ - Kansas State University
 
 
 ## Abstract
