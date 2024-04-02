@@ -1,5 +1,5 @@
 """
-Transient condunction in plate fuel elements.
+Transient conduction in 1-D cartesian geometry.
 
 Provides tools for solving
 
@@ -20,94 +20,30 @@ where Δ and Δ^2 indicate first and second central differences, i.e.,
   Δy[i]   = (y[i+1]-y[i-1])/(2Δ)
   Δ^2y[i] = (y[i+1]-2*y[i]+y[i-1])/(2Δ^2)
 
-Solution uses odeint in time.
-
-The user provides:
-
-  - function k(x, T)   # array x, array T  len(x) == len(T)
-  - function c_p(x, T) # array x, array T  len(x) == len(T)
-  - function rho(x)    # array x
-  - function q(x, t)   # array x, float t
-  - function T0(x)     # array x, (initial condition)
-  - float w 
-  - float t_final
-  - int n_x (or d_x)
-  - int n_t (or d_t)
-  - float d_x (adjusts down in size to produce integer n_x)
-  - float d_t (adjusts down in size to produce integer n_t)
-  - array t (times when solution is wanted)
-
-Uses backward Euler with fixed step sizes in x and t.
-
-
+Solution uses solve_ivp in time.
 """
 
 import numpy as np 
 from scipy.integrate import odeint, solve_ivp
 import matplotlib.pyplot as plt
+from time import time 
 
-def rhs(t, T, x, k, c_p, rho, q):
-    """ A@T + q'''/(rho*c_p)
-    """
-    A = get_A(x, T, k, c_p, rho)
-
-    qq = q(x, t)
-    qq[-1] = 0.0 # does not get added to bc
-    qq[0] = 0.0
-    return A@T + qq/(rho(x)*c_p(x, T)) 
 
 def get_source(T, t, x, k, c_p, rho, q):
     qq = q(x, t)
     qq[-1] = 0.0 # does not get added to bc
-    qq[0] = 0.0 
-    return qq 
-
-def solve_euler(k, c_p, rho, q, T0, w, nx, times):
-    x = np.linspace(0, w, nx)
-    ic = T0(x)
-
-    A = get_A(x, x**0, k, c_p, rho)
-
-    qq = q(x, 1)
-    qq[-1] = 0.0 # does not get added to bc
-    qq[0] = 0.0
-
-    # dydt = A*y + qq
-    #  y1-y0 = dt*A*y1 + dt*qq
-    #  (I-dt*A)*y1 = y0 + dt*qq
-    I = np.eye(len(x))
-
-    dt = 0.5
-    nt = 101
-    sol = np.zeros((len(x), nt))
-    sol[:, 0] = ic 
-
-    for i in range(1, 101):
-        y0 = sol[:, i-1]
-        y1 = np.linalg.solve((I-dt*A), y0+dt*qq)
-        sol[:, i] = y1 
-    return sol, x
-
-
-
-def solve(k, c_p, rho, q, T0, w, nx, times):
-    x = np.linspace(0, w, nx)
-    ic = T0(x)
-    dx = x[1]-x[0]    
-    sol = solve_ivp(rhs, t_span=(0, times[-1]), y0=ic, t_eval=times, args=(x, k, c_p, rho, q), method="BDF")
-    sol=sol.y
-    return sol, x
-
+    qq[0]  = 0.0 
+    return  qq/(rho(x)*c_p(x, T))  
 
 def get_A(x, T, fk, fc_p, frho):
     """Generate conduction problem system matrix given constants and temperature.
 
     Args:
-        T (_type_): _description_
-        fk (_type_): function k(x, )
-        fc_p (_type_): _description_
-        frho (_type_): _description_
-        T (_type_): _description_
+        x (array): points
+        T (array): temperature at points
+        fk (function): conductivity as function of x and T
+        fc_p (function): specific heat as function of x and T
+        frho (function): density as function of x 
     """
  
     assert len(x) == len(T)
@@ -132,14 +68,128 @@ def get_A(x, T, fk, fc_p, frho):
         A[i, i+1] = a+b
     return A 
 
- 
+def rhs(t, T, x, k, c_p, rho, q):
+    """ A@T + q'''/(rho*c_p)
+    """
+    A = get_A(x, T, k, c_p, rho)
+    s = get_source(T, t, x, k, c_p, rho, q)
+    return A@T + s
+
+def solve_steady_state(k, c_p, rho, q, ic, w, nx, verbose = False):
+    """Solve the full-order model for steady state, i.e., dT/dt = 0.
+
+    This assumes a constant source at t = 0.
+    """
+    x = np.linspace(0, w, nx)
+    T_ss_0 = ic(x) 
+    
+    # Picard iteration
+    for i in range(100):
+        A = get_A(x, T_ss_0, k, c_p, rho)
+        qq = get_source(T_ss_0, 0, x, k, c_p, rho, q)
+        T_ss = np.linalg.solve(-A, qq)
+        err = np.linalg.norm(T_ss - T_ss_0)
+        if verbose:
+            print(f"iter={i} err={err:.4e}")
+        if np.linalg.norm(T_ss - T_ss_0) < 1e-8:
+            if verbose:
+                print(f"converged steady state in {i} iterations.")
+            break 
+        T_ss_0[:] = T_ss[:]
+    return T_ss, x
+
+
+def solve(k, c_p, rho, q, T0, w, nx, times):
+    """Solve the full-order model. 
+
+    Args:
+        k (function): Conductivity, k(array: x, array: T)
+        c_p (function): Specific heat, c_p(array: x, array: T)
+        rho (function): Density, rho(array: x)
+        q (function): Heat generation rate, q(array: x, float: t)
+        T0 (function): Initial condition, T0(array: x)
+        w (float): Wall width
+        nx (int): Number of spatial points
+        times (array): Times at which solution is requested
+
+    Returns:
+        snapshots (array): Solution at each requested time, (nx, len(times))
+        x (array): Points at which solution is evaluated, (nx)
+    """
+    x = np.linspace(0, w, nx)
+    ic = T0(x)
+    sol = solve_ivp(rhs, t_span=(0, times[-1]), y0=ic, t_eval=times, args=(x, k, c_p, rho, q), method="BDF")
+    snapshots=sol.y
+    return snapshots, x
+
+def solve_rom(𝛙, x, k, c_p, rho, q, T0, times, nonlinear=False, deim=False):
+    """Solve the reduced-order model.
+
+    Args:
+        𝛙 (array): POD basis (nx, nt)
+        x (array): Spatial points on which POD basis is defined
+        k (function): Conductivity, k(array: x, array: T)
+        c_p (function): Specific heat, c_p(array: x, array: T)
+        rho (function): Density, rho(array: x)
+        q (function): Heat generation rate, q(array: x, float: t)
+        T0 (function): Initial condition, T0(array: x)
+        times (array): Times at which solution is requested
+    """
+
+    # from 
+    #   dy/dt = Ay + s
+    # to
+    #   dỹ/dt = (𝛙^T A 𝛙)ỹ + 𝛙^T s
+
+    # Project initial condition
+    T_tilde_0 = 𝛙.T@T0(x) 
+
+    if nonlinear == False:
+
+        # Get A evaluated at the initial condition
+        A = get_A(x, T0(x), k, c_p, rho)
+        #   and then project
+        A_tilde = 𝛙.T@(A@𝛙)
+
+        # Get the source at time t = 0
+        s = get_source(T0, 0, x, k, c_p, rho, q)
+        #   and then project
+        s_tilde = 𝛙.T@s
+
+        def rhs_rom(t, T_tilde, A_tilde, s_tilde):
+            return A_tilde@T_tilde + s_tilde
+        
+        sol = solve_ivp(rhs_rom, t_span=(0, times[-1]), y0=T_tilde_0, t_eval=times, args=(A_tilde, s_tilde), method="BDF")
+
+    else:
+
+        def rhs_rom_nl(t, T_tilde, 𝛙, x, k, c_p, rho, q):
+            # Get A evaluated at the initial condition
+            A = get_A(x, 𝛙@T_tilde, k, c_p, rho)
+            #   and then project
+            A_tilde = 𝛙.T@(A@𝛙)
+            # Get the source at time t = 0
+            s = get_source(T0, t, x, k, c_p, rho, q)
+            #   and then project
+            s_tilde = 𝛙.T@s
+            return A_tilde@T_tilde + s_tilde
+        
+        sol = solve_ivp(rhs_rom_nl, t_span=(0, times[-1]), y0=T_tilde_0, t_eval=times, args=(𝛙, x, k, c_p, rho, q), method="BDF")
+
+    T_tilde = sol.y # [r, nt]
+    T = 𝛙@T_tilde 
+
+    return T
+
+
+
 def get_pod_basis(snapshots, rank):
 
     U, S, V = np.linalg.svd(snapshots)
 
     return U[:, 0:rank], S[:, 0:rank]
 
-def k_fuel(T_K, B=0.0) : 
+def k_fuel(x, T_K, B=0.0) : 
     """ Calculate fuel conductivity (W/m-K) for temperature T_K (K)
     
     From J.D. Hales et al. (2013) "Bison Theory" (NFIR model)
@@ -158,48 +208,142 @@ def k_fuel(T_K, B=0.0) :
     k = (1.0-rf)*kps + rf*kpend + kel
     return k
 
-def k_cladding(T) :
+def k_cladding(x, T) :
     """ Returns thermal conductivity (W/m) for Zr-4 at temperature T (K)
     
     Reference: INL/EXT-14-32591, Revision 1
     """
     return 7.511 + 2.088e-2*T - 1.45e-5*T**2 + 7.668e-9*T**3
 
+    
 
-if __name__ == "__main__":
+def demo_problem_simple():
 
-    nx = 77
-
+    # Problem definition
+    nx = 101  # number of spatial cells
+    w = 1.0   # width of wall
     def ic(x):
         y = x**0; y[x>0.5] = 0.0
         return y
-
     k = lambda x, T: 1.0*x**0  
     c_p = lambda x, T: 1*x**0
     rho = lambda x: 1*x**0
     q = lambda x, t: 1*x**0
 
-    def q(x, t):
-        v = x**0 
-        if t > 5:
-            v[x<.5] = 0
-        return v
 
-    times = np.linspace(0, 50, 11)
-
-    xx = np.linspace(0, 1, nx)
-    A = get_A(xx, ic(xx), k, c_p, rho)
-    qq = get_source(ic(xx), 8, xx, k, c_p, rho, q)
-    T_ss = np.linalg.solve(-A, qq)
-    plt.plot(xx, T_ss, 'g--x', label="steady")
-
-    sol, x = solve(k, c_p, rho, q, ic, 1.0, 101, times)
-
+    # Solve FOM and extract snapshots
+    times = np.linspace(0, 10, 11)
+    sol_fom, x = solve(k, c_p, rho, q, ic, 1.0, nx, times)
+    plt.figure(1, figsize=(8, 4))
+    plt.title("FOM-Generated Snapshots")
     for i in range(len(times)):
-        plt.plot(x, sol[:, i], color=plt.cm.copper((i/len(times)))); 
+        plt.plot(x, sol_fom[:, i], color=plt.cm.copper(np.sqrt(i/len(times)))); 
+    # Steady-state solution (for sanity check)
+    A = get_A(x, ic(x), k, c_p, rho)
+    qq = get_source(ic(x), 0, x, k, c_p, rho, q)
+    T_ss = np.linalg.solve(-A, qq)
+    plt.plot(x, T_ss, 'b--', label=r"$T(\infty)$")
     plt.xlabel("x"); plt.ylabel("T(x)");
-
     plt.legend()
+    plt.tight_layout()
+
+    # Generate the POD modes
+    U, S, V = np.linalg.svd(sol_fom[:,:])  # or sol[:,1:]! 
+    plt.figure(2, figsize=(8,4))
+    plt.title("Singular Values of Snapshot Matrix")
+    plt.semilogy(S, 'o')
+    plt.tight_layout()
+    plt.figure(3, figsize=(8,4))
+    plt.title("POD Modes")
+    r = 5
+    𝛙 = U[:, :r]
+    plt.plot(x, 𝛙);
+    plt.legend(range(0,5))
+    plt.tight_layout()
+
+    # Solve the ROM
+    sol_rom = solve_rom(𝛙, x, k, c_p, rho, q, ic, times)
+    plt.figure(4, figsize=(8, 4))
+    plt.title("ROM Solution")
+    for i in range(len(times)):
+        plt.plot(x, sol_rom[:, i], color=plt.cm.copper(np.sqrt(i/len(times)))); 
+    plt.figure(5, figsize=(8, 4))
+    plt.title("ROM Error (%)")
+    for i in range(len(times)):
+        plt.plot(x, 100*(abs(sol_rom[:, i]-sol_fom[:, i])/sol_fom[:, i]), color=plt.cm.copper(np.sqrt(i/len(times)))); 
     plt.show()
+
+def demo_problem_nonlinear(nonlinear=False):
+
+    # NOTE: zeroing in on an interesting temperature profile
+    #       that requires the nonlinearity to be accounted for
+
+    # Problem definition
+    nx =101  # number of spatial cells
+    w = 1.0   # width of wall
+    def ic(x):
+        y = 600*(1-x)
+        y[-1] = 0
+        return y
+
+    k = k_cladding
+    #k = lambda x, T: 15*x**0
+    c_p = lambda x, T: 100*x**0
+    rho = lambda x: 18*x**0
+    q = lambda x, t: 15000*x**0
+
+    # Solve FOM and extract snapshots
+    times = np.linspace(0, 1000, 21)
+    t0 = time()
+    sol_fom, x = solve(k, c_p, rho, q, ic, w, nx, times)
+    te = time()-t0
+    print(f"FOM solved in {te:.4e} s")
+    plt.figure(1, figsize=(8, 4))
+    plt.title("FOM-Generated Snapshots")
+    print(sol_fom.shape)
+    for i in range(len(times)):
+        plt.plot(x, sol_fom[:, i], color=plt.cm.copper(np.sqrt(i/len(times)))); 
+    # Steady-state solution (for sanity check)
+    T_ss, _ = solve_steady_state(k, c_p, rho, q, ic, w, nx)
+    plt.plot(x, T_ss, 'b--', label=r"$T(\infty)$")
+    plt.xlabel("x"); plt.ylabel("T(x)");
+    plt.legend()
+    plt.tight_layout()
+
+    # Generate the POD modes
+    t0 = time()
+    U, S, V = np.linalg.svd(sol_fom[:,:])  # or sol[:,1:]! 
+    te = time()-t0
+    print(f"POD modes found in {te:.4e} s")
+    plt.figure(2, figsize=(8,4))
+    plt.title("Singular Values of Snapshot Matrix")
+    plt.semilogy(S, 'o')
+    plt.tight_layout()
+    plt.figure(3, figsize=(8,4))
+    plt.title("POD Modes")
+    r = 8
+    𝛙 = U[:, :r]
+    plt.plot(x, 𝛙);
+    plt.legend(range(0,5))
+    plt.tight_layout()
+
+    # Solve the ROM
+    t0 = time()
+    sol_rom = solve_rom(𝛙, x, k, c_p, rho, q, ic, times, nonlinear=nonlinear)
+    te = time()-t0
+    print(f"ROM solved in {te:.4e} s")
+    plt.figure(4, figsize=(8, 4))
+    plt.title("ROM Solution")
+    for i in range(len(times)):
+        plt.plot(x, sol_rom[:, i], color=plt.cm.copper(np.sqrt(i/len(times)))); 
+    plt.figure(5, figsize=(8, 4))
+    plt.title("ROM Error (%)")
+    for i in range(len(times)):
+        plt.plot(x, 100*(abs(sol_rom[:, i]-sol_fom[:, i])/sol_fom[:, i]), color=plt.cm.copper(np.sqrt(i/len(times)))); 
+    plt.show()
+
+if __name__ == "__main__":
+
+    demo_problem_nonlinear(nonlinear=False)
 
 
