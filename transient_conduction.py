@@ -99,7 +99,7 @@ def solve_steady_state(k, c_p, rho, q, ic, w, nx, verbose = False):
     return T_ss, x
 
 
-def solve(k, c_p, rho, q, T0, w, nx, times):
+def solve(k, c_p, rho, q, T0, w, nx, times, gen_nl_snapshots=False):
     """Solve the full-order model. 
 
     Args:
@@ -115,12 +115,25 @@ def solve(k, c_p, rho, q, T0, w, nx, times):
     Returns:
         snapshots (array): Solution at each requested time, (nx, len(times))
         x (array): Points at which solution is evaluated, (nx)
+        nl_snapshots (array): Snapshots of the term f(T) = A(T)*T at the same times.
     """
     x = np.linspace(0, w, nx)
     ic = T0(x)
     sol = solve_ivp(rhs, t_span=(0, times[-1]), y0=ic, t_eval=times, args=(x, k, c_p, rho, q), method="BDF")
     snapshots=sol.y
-    return snapshots, x
+    
+    if gen_nl_snapshots == True:
+        nl_snapshots = np.zeros_like(snapshots)
+        for i in range(len(times)):
+            A = get_A(x, snapshots[:, i], k, c_p, rho)
+            nl_snapshots[:, i] = A@snapshots[:, i]
+        return snapshots, x, nl_snapshots
+    else:
+        return snapshots, x
+
+
+def deim():
+    pass
 
 def solve_rom(𝛙, x, k, c_p, rho, q, T0, times, nonlinear=False, deim=False):
     """Solve the reduced-order model.
@@ -163,18 +176,27 @@ def solve_rom(𝛙, x, k, c_p, rho, q, T0, times, nonlinear=False, deim=False):
 
     else:
 
-        def rhs_rom_nl(t, T_tilde, 𝛙, x, k, c_p, rho, q):
-            # Get A evaluated at the initial condition
-            A = get_A(x, 𝛙@T_tilde, k, c_p, rho)
-            #   and then project
-            A_tilde = 𝛙.T@(A@𝛙)
-            # Get the source at time t = 0
-            s = get_source(T0, t, x, k, c_p, rho, q)
-            #   and then project
-            s_tilde = 𝛙.T@s
-            return A_tilde@T_tilde + s_tilde
-        
-        sol = solve_ivp(rhs_rom_nl, t_span=(0, times[-1]), y0=T_tilde_0, t_eval=times, args=(𝛙, x, k, c_p, rho, q), method="BDF")
+        if deim == True:
+
+            # Use DEIM to approximate the nonlinear part of the system.
+            # Here, we're taking f(T) = A(T)*T to be that part.  Hence, cp and rho are T-independent by assumption.
+            pass
+
+        else:
+            # Project at every time step.
+
+            def rhs_rom_nl(t, T_tilde, 𝛙, x, k, c_p, rho, q):
+                # Get A evaluated at the initial condition
+                A = get_A(x, 𝛙@T_tilde, k, c_p, rho)
+                #   and then project
+                A_tilde = 𝛙.T@(A@𝛙)
+                # Get the source at time t = 0
+                s = get_source(T0, t, x, k, c_p, rho, q)
+                #   and then project
+                s_tilde = 𝛙.T@s
+                return A_tilde@T_tilde + s_tilde
+            
+            sol = solve_ivp(rhs_rom_nl, t_span=(0, times[-1]), y0=T_tilde_0, t_eval=times, args=(𝛙, x, k, c_p, rho, q), method="BDF")
 
     T_tilde = sol.y # [r, nt]
     T = 𝛙@T_tilde 
@@ -278,6 +300,8 @@ def demo_problem_nonlinear(nonlinear=False):
     # NOTE: zeroing in on an interesting temperature profile
     #       that requires the nonlinearity to be accounted for
 
+    purple = "#512888"
+
     # Problem definition
     nx =101  # number of spatial cells
     w = 1.0   # width of wall
@@ -292,58 +316,80 @@ def demo_problem_nonlinear(nonlinear=False):
     rho = lambda x: 18*x**0
     q = lambda x, t: 15000*x**0
 
+    fig, axs = plt.subplots(3, 2, figsize=(10, 8), layout='constrained')
+
     # Solve FOM and extract snapshots
     times = np.linspace(0, 1000, 21)
     t0 = time()
-    sol_fom, x = solve(k, c_p, rho, q, ic, w, nx, times)
+    sol_fom, x, nl_fom = solve(k, c_p, rho, q, ic, w, nx, times, gen_nl_snapshots=True)
     te = time()-t0
     print(f"FOM solved in {te:.4e} s")
-    plt.figure(1, figsize=(8, 4))
-    plt.title("FOM-Generated Snapshots")
+    axs[0, 0].set_title("FOM-Generated Snapshots")
     print(sol_fom.shape)
     for i in range(len(times)):
-        plt.plot(x, sol_fom[:, i], color=plt.cm.copper(np.sqrt(i/len(times)))); 
+        axs[0, 0].plot(x, sol_fom[:, i], color=plt.cm.copper(np.sqrt(i/len(times)))); 
     # Steady-state solution (for sanity check)
     T_ss, _ = solve_steady_state(k, c_p, rho, q, ic, w, nx)
-    plt.plot(x, T_ss, 'b--', label=r"$T(\infty)$")
-    plt.xlabel("x"); plt.ylabel("T(x)");
-    plt.legend()
-    plt.tight_layout()
+    axs[0, 0].plot(x, T_ss, 'b--', label=r"$T(\infty)$")
+    axs[0, 0].set_xlabel("x"); 
+    axs[0, 0].set_ylabel("T(x)");
+    axs[0, 0].legend()
 
     # Generate the POD modes
     t0 = time()
     U, S, V = np.linalg.svd(sol_fom[:,:])  # or sol[:,1:]! 
     te = time()-t0
     print(f"POD modes found in {te:.4e} s")
-    plt.figure(2, figsize=(8,4))
-    plt.title("Singular Values of Snapshot Matrix")
-    plt.semilogy(S, 'o')
-    plt.tight_layout()
-    plt.figure(3, figsize=(8,4))
-    plt.title("POD Modes")
+    axs[1, 0].set_title("Singular Values of Snapshot Matrix")
+    axs[1, 0].semilogy(range(1, len(S)+1), S, 'o', color=purple)
+    axs[2, 0].set_title("POD Modes")
     r = 8
     𝛙 = U[:, :r]
-    plt.plot(x, 𝛙);
-    plt.legend(range(0,5))
-    plt.tight_layout()
-
+    axs[2, 0].plot(x, 𝛙);
+    axs[2, 0].legend(range(0,5))
+    axs[2, 0].set_xlabel("x"); 
+    print(axs.shape)
     # Solve the ROM
     t0 = time()
     sol_rom = solve_rom(𝛙, x, k, c_p, rho, q, ic, times, nonlinear=nonlinear)
     te = time()-t0
     print(f"ROM solved in {te:.4e} s")
-    plt.figure(4, figsize=(8, 4))
-    plt.title("ROM Solution")
+    axs[0,1].set_title("ROM Solution")
     for i in range(len(times)):
-        plt.plot(x, sol_rom[:, i], color=plt.cm.copper(np.sqrt(i/len(times)))); 
-    plt.figure(5, figsize=(8, 4))
-    plt.title("ROM Error (%)")
+        axs[0,1].plot(x, sol_rom[:, i], color=plt.cm.copper(np.sqrt(i/len(times)))); 
+    
+    axs[1,1].set_title("ROM Error (%)")
     for i in range(len(times)):
-        plt.plot(x, 100*(abs(sol_rom[:, i]-sol_fom[:, i])/sol_fom[:, i]), color=plt.cm.copper(np.sqrt(i/len(times)))); 
-    plt.show()
+        axs[1,1].plot(x, 100*(abs(sol_rom[:, i]-sol_fom[:, i])/sol_fom[:, i]), color=plt.cm.copper((i/len(times)))); 
+    axs[1,1].set_xlabel("x")
+
+    axs[2,1].set_title("ROM Error (%)")
+    for i in range(len(x)):
+        axs[2,1].plot(times, 100*(abs(sol_rom[i, :]-sol_fom[i,:])/sol_fom[i, :]), color=plt.cm.copper((i/len(x)))); 
+    axs[2,1].set_xlabel("t")
+    
+    plt.tight_layout()
+    #plt.show()
+    
+   # plt.clf()
+    fig, axs = plt.subplots(2, 2, figsize=(8, 8), layout='constrained')
+    U, S, V = np.linalg.svd(nl_fom[:,:])  # or sol[:,1:]! 
+    te = time()-t0
+    print(f"POD modes found in {te:.4e} s")
+    axs[0, 0].set_title("Singular Values of Snapshot Matrix")
+    axs[0, 0].semilogy(range(1, len(S)+1), S, 'o', color=purple)
+    axs[0, 0].set_title("POD Modes")
+    r = 8
+    𝛙 = U[:, :r]
+    axs[1, 0].plot(x, 𝛙);
+    axs[1, 0].legend(range(0,5))
+    axs[1, 0].set_xlabel("x");  
+    print(axs.shape)
+    plt.tight_layout()
+    plt.show() 
 
 if __name__ == "__main__":
 
-    demo_problem_nonlinear(nonlinear=False)
+    demo_problem_nonlinear(nonlinear=True)
 
 
