@@ -132,10 +132,19 @@ def solve(k, c_p, rho, q, T0, w, nx, times, gen_nl_snapshots=False):
         return snapshots, x
 
 
-def deim():
-    pass
+def apply_deim(U):
+    """ DEIM
+    """
+    n, m = U.shape
+    p = [np.argmax(abs(U[:, 0]))]
+    for j in range(1, m):
+        z = np.linalg.solve(U[p, :j], U[p, j])
+        r = U[:, j] - U[:, :j]@z 
+        p.append(np.argmax(abs(r)))
+    return p 
 
-def solve_rom(𝛙, x, k, c_p, rho, q, T0, times, nonlinear=False, deim=False):
+
+def solve_rom(𝛙, x, k, c_p, rho, q, T0, times, nonlinear=False, deim=False, θ=None):
     """Solve the reduced-order model.
 
     Args:
@@ -180,8 +189,32 @@ def solve_rom(𝛙, x, k, c_p, rho, q, T0, times, nonlinear=False, deim=False):
 
             # Use DEIM to approximate the nonlinear part of the system.
             # Here, we're taking f(T) = A(T)*T to be that part.  Hence, cp and rho are T-independent by assumption.
-            pass
+            p = apply_deim(θ)
 
+            def rhs_rom_deim(t, T_tilde, 𝛙, x, k, c_p, rho, q, θ, p):
+                M = 𝛙.T@θ
+                Pθ = θ[p,:]
+                # Get A evaluated at the initial condition
+                A = get_A(x, 𝛙@T_tilde, k, c_p, rho)
+                fp = A[p,:]@(𝛙@T_tilde)
+                # This is a full reproduction of f=A*T, which we want to avoid in practice!
+                f_tilde1 = M@np.linalg.solve(Pθ, fp)
+                # Get the source at time t = 0
+                s = get_source(T0, t, x, k, c_p, rho, q)
+                #   and then project
+                s_tilde = 𝛙.T@s
+
+                # Full reconstruction and projection
+                #f_tilde = 𝛙.T@(A@(𝛙@T_tilde))
+
+                #print("F1 =", f_tilde1)
+                #print("F2 =", f_tilde)
+
+                return f_tilde1 + s_tilde
+            
+            sol = solve_ivp(rhs_rom_deim, t_span=(0, times[-1]), y0=T_tilde_0, t_eval=times, args=(𝛙, x, k, c_p, rho, q, θ, p), method="BDF")
+
+            
         else:
             # Project at every time step.
 
@@ -295,7 +328,7 @@ def demo_problem_simple():
         plt.plot(x, 100*(abs(sol_rom[:, i]-sol_fom[:, i])/sol_fom[:, i]), color=plt.cm.copper(np.sqrt(i/len(times)))); 
     plt.show()
 
-def demo_problem_nonlinear(nonlinear=False):
+def demo_problem_nonlinear(nonlinear=False, deim=False):
 
     # NOTE: zeroing in on an interesting temperature profile
     #       that requires the nonlinearity to be accounted for
@@ -349,9 +382,21 @@ def demo_problem_nonlinear(nonlinear=False):
     axs[2, 0].legend(range(0,5))
     axs[2, 0].set_xlabel("x"); 
     print(axs.shape)
+
+    θ = None
+    if nonlinear:
+        # NL Modes
+        U, S, V = np.linalg.svd(nl_fom[:,:])  # or sol[:,1:]! 
+        te = time()-t0
+        print(f"NL POD modes found in {te:.4e} s")
+        r = 10
+        θ = U[:, :r]
+    print("NL shape ", θ.shape)
+
     # Solve the ROM
     t0 = time()
-    sol_rom = solve_rom(𝛙, x, k, c_p, rho, q, ic, times, nonlinear=nonlinear)
+    sol_rom = solve_rom(𝛙, x, k, c_p, rho, q, ic, times, nonlinear=nonlinear, deim=deim, θ=θ)
+    print(sol_rom.shape)
     te = time()-t0
     print(f"ROM solved in {te:.4e} s")
     axs[0,1].set_title("ROM Solution")
@@ -372,15 +417,7 @@ def demo_problem_nonlinear(nonlinear=False):
     #plt.show()
     
    # plt.clf()
-    fig, axs = plt.subplots(2, 2, figsize=(8, 8), layout='constrained')
-    U, S, V = np.linalg.svd(nl_fom[:,:])  # or sol[:,1:]! 
-    te = time()-t0
-    print(f"POD modes found in {te:.4e} s")
-    axs[0, 0].set_title("Singular Values of Snapshot Matrix")
-    axs[0, 0].semilogy(range(1, len(S)+1), S, 'o', color=purple)
-    axs[0, 0].set_title("POD Modes")
-    r = 8
-    𝛙 = U[:, :r]
+
     axs[1, 0].plot(x, 𝛙);
     axs[1, 0].legend(range(0,5))
     axs[1, 0].set_xlabel("x");  
@@ -390,6 +427,12 @@ def demo_problem_nonlinear(nonlinear=False):
 
 if __name__ == "__main__":
 
-    demo_problem_nonlinear(nonlinear=True)
+    demo_problem_nonlinear(nonlinear=True, deim=True)
+    # x = np.linspace(0, 1, 10)
+    # U = np.array([x**0, x**1, x**2]).T
+    # plt.plot(x, U)
+    # plt.show()
+    # idx = deim(U)
+    # print(idx)
 
 
